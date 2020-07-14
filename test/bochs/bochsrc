@@ -1,0 +1,11 @@
+romimage: file=$BXSHARE/BIOS-bochs-latest
+vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest
+mouse: enabled=0
+pci: enabled=1, chipset=i440fx
+floppya: image="boot.img", status=inserted
+ata0-master: type=disk, path="hdc.img", mode=flat
+ata0-slave: type=cdrom, path="", status=ejected
+boot: floppy
+log: bochsout.txt
+megs: 64
+cpu: ips=15000000
