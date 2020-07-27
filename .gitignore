@@ -57,5 +57,5 @@ dkms.conf
 *.iso
 
 # 忽略bochs日志文件
-bochsout.txt
+test/bochs/bochsout.txt
 
