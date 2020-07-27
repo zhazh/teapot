@@ -53,3 +53,9 @@ dkms.conf
 
 # 忽略软盘和磁盘文件
 *.img
+*.bin
+*.iso
+
+# 忽略bochs日志文件
+bochsout.txt
+
