@@ -60,8 +60,8 @@ label_boot_start:
 
     ; 显示boot信息
     ; ==============================
-    mov bp, boot_msg
-    mov cx, boot_msg_len
+    mov bp, msg_boot
+    mov cx, msg_boot_len
     mov dx, 0x0000          ; 第一行第一列，坐标为(0,0)
     call sub_show_str
 
@@ -69,13 +69,31 @@ label_boot_start:
     ; ==================================
     mov word [var_rdir_count],  14      ; 初始化根目录区扇区数量为14
     mov word [var_rdir_sec_no], 19      ; 初始化根目录区开始逻辑扇区编号为19
+    mov ax, cs
+    mov ds, ax
+    mov es, ax  ; 初始化es寄存器
     loop_load_rdir_sec:
-        ; 循环读取根目录区扇区
+        ; 循环读取根目录区扇区数据并查找loader.bin
+        ; ========================================
         mov ax, [var_rdir_sec_no]
         mov bx, addr_of_sec_buf
-        call sub_load_one_sector    ; 将ax标识的扇区读取到es:bx处
+        call sub_load_one_sector    ; 读取一个根目录扇区数据到ES:BX处
+
+        sub word [var_rdir_count], 1
+        add word [var_rdir_sec_no], 1
+
+        ; 调用中断显示读取进度
+        ; =======================
+        mov cx, [var_rdir_sec_no]
+        sub cx, 19
+        mov ax, 0x092e
+        mov bx, 0x0007
+        int 10h
+
         ; 在ES:BX的扇区数据中查找loader.bin
-        mov ax, 16  ; 一个扇区共16个目录项
+        ; ================================
+        mov cx, 16  ; 每个目录项32B，所以一个扇区共16个目录项
+        mov bx, addr_of_sec_buf
         loop_rdir_entry_cmp:
             push cx
             mov si, target_name
@@ -83,54 +101,51 @@ label_boot_start:
             mov cx, 11
             call sub_compare_2str
             jcxz lable_founded
+
+            pop cx
             add bx, root_dir_entry_size ; add bx, 32
-            dec ax
-            cmp ax, 0
-            jne loop_rdir_entry_cmp
-        sub word [var_rdir_count], 1
-        add word [var_rdir_sec_no], 1
+            loop loop_rdir_entry_cmp
+
         cmp word [var_rdir_count], 0
         jne loop_load_rdir_sec
-label_not_found:
-    mov bp, msg_loader_not_found
-    mov cx, msg_loader_not_found_len
+label_loader_error:
+    mov bp, msg_loader_error
+    mov cx, msg_loader_error_len
     mov dx, 0x0100              ; 第二行第一列显示
     call sub_show_str
     jmp label_boot_end
 lable_founded:
     ; ES:BX 是该目录项首地址
     mov ax, [es:bx + root_dir_entry.fst_clus]
-    mov [var_loader_clus_no], ax
+    mov [var_current_clus_no], ax   ; current_clus_no = fst_clus
     mov ax, base_of_loader
     mov es, ax
     mov bx, offset_of_loader
     loop_get_clus:
         ; 加载数据区扇区到ES:BX位置处
-        mov ax, [var_loader_clus_no]
+        ; ============================
+        mov ax, [var_current_clus_no]
         sub ax, 2       ; 数据区簇编号从2开始
         add ax, 33      ; 数据区起始逻辑扇区是33
         call sub_load_one_sector
         add bx, 512
 
-        ; 获取下一个簇号
-        mov ax, [var_loader_clus_no]
-        call sub_get_next_clus_no
-        cmp ax, 0x0fff      
-        je label_jmp_loader ; 如果FAT项值为0x0fff，则此簇为最后一个簇，跳转到loader.bin执行
-        mov [var_loader_clus_no], ax    ; 保存下一簇簇号
-        cmp ax, 0x0ff0
-        jb loop_get_clus
-        jmp lable_fat_entry_error
-    label_jmp_loader:
-        jmp base_of_loader:offset_of_loader
-    lable_fat_entry_error:
+        ; 获取下一个簇号，并根据簇号值选择跳转
+        ; ================================
+        mov ax, [var_current_clus_no]    ; ax = current_clus_no
+        call sub_get_next_clus_no       ; ax = next_clus_no
+        cmp ax, 0x0fff      ; clus_no = 0fff, 表示此簇为尾簇      
+        je label_jmp_loader ; 尾簇，跳转执行loader.bin
+        mov [var_current_clus_no], ax    ; 保存下一簇簇号， current_clus_no = ax
+        cmp ax, 0x0ff0      ; FAT12中, 0x0001 - 0x0fef为有效的下一簇指针
+        jb loop_get_clus    ; if current_clus_no < 0xff0: goto loop_get_clus
+        ; else 不正常.
         mov ax, cs
         mov es, ax
-        mov bp, msg_fat_ent_err
-        mov cx, msg_fat_ent_err_len
-        mov dx, 0x0100              ; 第二行第一列显示
-        call sub_show_str
-        jmp label_boot_end
+        jmp label_loader_error ; 显示错误并结束程序。
+    label_jmp_loader:
+        ; 跳转到loader.bin程序位置执行。
+        jmp base_of_loader:offset_of_loader
 label_boot_end:
     hlt
     jmp short label_boot_end
@@ -218,45 +233,53 @@ label_boot_end:
         ret
     
     sub_get_next_clus_no:
-        ; 读取FAT表，根据当前簇号，获取下一个簇号。
+        ; 根据当前簇号clus_no，查找FAT1表，获取下一个簇号。
         ; 入参：
         ; ===========================
-        ; AX: 当前簇号 有效值：0x001 - 0xff6
+        ; AX: 当前簇号clus_no
         ; 出参：
         ; ===========================
-        ; AX: 下一个簇号
+        ; AX: 下一个簇号next_clus_no
         push bp
         push bx
         push cx
         push dx
 
-        sub sp, 2
+        sub sp, 4
         mov bp, sp
-        mov cx, es
-        mov [ss:bp], cx    ; 存储原来的es
-    
-        mov cx, cs
-        mov es, cx      ; 因为要用到es:bp来存储扇区数据，所以将es设置为当前段
+        mov word [ss:bp], ax        ; 临时clus_no的值
+        mov bx, es
+        mov word [ss:bp + 2], bx    ; 存储原es段地址
+        mov bx, cs
+        mov es, bx                  ; 将es段置为当前段地址
 
-        mov cx, 12
-        mul cx          ; DX$AX = AX * 12
-        mov cx, 512     
-        div cx          ; DX$AX/512, 商AX为FAT1表的偏移扇区，余数DX为FAT项的开始字节号
-        add ax, 1       ; FAT1表开始编号为1
-        ; 读取两个连续扇区的数据到缓冲中
+        mov cx, 3
+        mul cx
+        mov cx, 2
+        div cx      ; 每个FAT项占用1.5B，clus_no×3/2 = offset, 即商offset（AX）为该FAT项目开始的位置
+        mov dx, 0   
+        mov cx, 512 
+        div cx      ; offset/512 = 相对扇区...偏移地址, 商AX为偏移扇区，余数DX(后面使用)为字节数开始位置
+        add ax, 1   ; FAT1表的开始扇区为1。
         mov bx, addr_of_sec_buf
-        call sub_load_one_sector
-        inc ax
+        call sub_load_one_sector    ; 读取第一个扇区数据到es:8000h处
         add bx, 512
-        call sub_load_one_sector
-
+        add ax, 1
+        call sub_load_one_sector    ; 读取第二个扇区数据到es:8000h+512处
         mov bx, dx
         mov ax, [es:addr_of_sec_buf + bx]
-        and ax, 0x0fff
-
         mov cx, [ss:bp]
-        mov es, cx      ; 恢复es段
-        add sp, 2
+        and cx, 0x0001
+        jcxz _label_gncn_even
+        ; clus_no 是奇数
+        shr ax, 4               ; 取高12位数据
+        jmp _label_gncn_end
+        _label_gncn_even:       ; clus_no是偶数
+        and ax, 0x0fff          ; 取低12位数据
+        _label_gncn_end:
+        mov bx, word [ss:bp + 2]
+        mov es, bx              ; 恢复原es段地址
+        add sp, 4
         pop dx
         pop cx
         pop bx
@@ -265,15 +288,12 @@ label_boot_end:
 
 var_rdir_count:             dw 0x0000
 var_rdir_sec_no:            dw 0x0000
-var_loader_clus_no:         dw 0x0000
-var_es_bak:                 dw 0x0000
-boot_msg:                   db 'Boot start'
-boot_msg_len                equ $ - boot_msg
+var_current_clus_no:        dw 0x0000
+msg_boot:                   db 'Boot start'
+msg_boot_len                equ $ - msg_boot
 target_name:                db 'LOADER  BIN'    ; 目标文件名称
-msg_loader_not_found:       db 'Loader not found!'
-msg_loader_not_found_len    equ $ - msg_loader_not_found 
-msg_fat_ent_err:            db 'FAT entry error!'
-msg_fat_ent_err_len         equ $ - msg_fat_ent_err 
+msg_loader_error:           db 'Loader error!'
+msg_loader_error_len        equ $ - msg_loader_error 
 ; ======= fill zero util one sector ======
 times 510 - ($ - $$) db 0
 dw 0xaa55

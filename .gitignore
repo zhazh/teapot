@@ -52,7 +52,7 @@ Mkfile.old
 dkms.conf
 
 # 忽略软盘和磁盘文件
-*.img
+hdc.img
 *.bin
 *.iso
 *.lock
